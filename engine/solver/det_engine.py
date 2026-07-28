@@ -21,6 +21,21 @@ from ..data import CocoEvaluator
 from ..misc import MetricLogger, SmoothedValue, dist_utils
 
 
+def _nonfinite_output_paths(value, path="outputs"):
+    """Return paths of floating tensors containing NaN or Inf."""
+    paths = []
+    if torch.is_tensor(value):
+        if value.is_floating_point() and not torch.isfinite(value).all():
+            paths.append(path)
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            paths.extend(_nonfinite_output_paths(item, f"{path}.{key}"))
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            paths.extend(_nonfinite_output_paths(item, f"{path}[{index}]"))
+    return paths
+
+
 def train_one_epoch(self_lr_scheduler, lr_scheduler, model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, max_norm: float = 0, **kwargs):
@@ -46,22 +61,40 @@ def train_one_epoch(self_lr_scheduler, lr_scheduler, model: torch.nn.Module, cri
         metas = dict(epoch=epoch, step=i, global_step=global_step, epoch_step=len(data_loader))
 
         if scaler is not None:
-            with torch.autocast(device_type=str(device), cache_enabled=True):
+            # FP16's limited exponent range can overflow in TinyFormer XL's
+            # decoder at larger batches. BF16 has FP32-like exponent range and
+            # is supported by A100/H100-class GPUs; retain FP16 for older GPUs.
+            amp_dtype = (
+                torch.bfloat16
+                if device.type == "cuda" and torch.cuda.is_bf16_supported()
+                else torch.float16
+            )
+            with torch.autocast(device_type=device.type, dtype=amp_dtype, cache_enabled=True):
                 outputs = model(samples, targets=targets)
 
-            if torch.isnan(outputs['pred_boxes']).any() or torch.isinf(outputs['pred_boxes']).any():
-                print(outputs['pred_boxes'])
-                state = model.state_dict()
-                new_state = {}
-                for key, value in model.state_dict().items():
-                    # Replace 'module' with 'model' in each key
-                    new_key = key.replace('module.', '')
-                    # Add the updated key-value pair to the state dictionary
-                    state[new_key] = value
-                new_state['model'] = state
-                dist_utils.save_on_master(new_state, "./NaN.pth")
+            bad_paths = _nonfinite_output_paths(outputs)
+            if bad_paths:
+                image_ids = [
+                    int(target["image_id"].item())
+                    for target in targets
+                    if "image_id" in target and target["image_id"].numel() == 1
+                ]
+                print(
+                    f"Non-finite AMP output at epoch={epoch}, step={i}, "
+                    f"images={image_ids}, tensors={bad_paths}; retrying this batch in FP32."
+                )
+                # Recompute instead of clamping boxes or bypassing the GIoU
+                # assertion: both alternatives would train on invalid values.
+                with torch.autocast(device_type=device.type, enabled=False):
+                    outputs = model(samples.float(), targets=targets)
+                bad_paths = _nonfinite_output_paths(outputs)
+                if bad_paths:
+                    raise FloatingPointError(
+                        f"Non-finite model output persisted in FP32 at epoch={epoch}, "
+                        f"step={i}, images={image_ids}, tensors={bad_paths}."
+                    )
 
-            with torch.autocast(device_type=str(device), enabled=False):
+            with torch.autocast(device_type=device.type, enabled=False):
                 loss_dict = criterion(outputs, targets, **metas)
 
             loss = sum(loss_dict.values())
