@@ -103,7 +103,12 @@ class DetSolver(BaseSolver):
 
             self.last_epoch += 1
 
-            if self.output_dir and epoch < self.train_dataloader.collate_fn.stop_epoch:
+            # Always keep a resumable checkpoint for the most recently
+            # completed training epoch. Previously this block stopped running
+            # at ``stop_epoch`` (the stage-1/stage-2 boundary), which left
+            # ``last.pth`` frozen at epoch 49 even when training had progressed
+            # much further.
+            if self.output_dir:
                 checkpoint_paths = [self.output_dir / 'last.pth']
                 # extra checkpoint before LR drop and every 100 epochs
                 if (epoch + 1) % args.checkpoint_freq == 0:
