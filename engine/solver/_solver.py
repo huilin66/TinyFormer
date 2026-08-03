@@ -176,6 +176,13 @@ class BaseSolver(object):
         else:
             pretrain_state_dict = state['model']
 
+        # Multimodal wrappers may expose a compatibility mapper that expands
+        # legacy single-modal weights into shared or independent branches.
+        if hasattr(module, 'remap_tuning_state_dict'):
+            remapped_state_dict = module.remap_tuning_state_dict(pretrain_state_dict)
+            if remapped_state_dict:
+                pretrain_state_dict = remapped_state_dict
+
         # Adjust head parameters between datasets
         try:
             adjusted_state_dict = self._adjust_head_parameters(module.state_dict(), pretrain_state_dict)

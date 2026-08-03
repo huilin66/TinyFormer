@@ -2,6 +2,10 @@
   TinyFormer: Preserving Tiny Objects in YOLO-DETR Hybrid Real-time Detectors
 </h2>
 
+Multimodal development on the `det_mb` branch is documented in
+[docs/multimodal.md](docs/multimodal.md). It supports IF/BF/SF/EF/NF/DF/FF,
+arbitrary modality counts, pluggable fusion, and optional branch weight sharing.
+
 <!-- <p align="center">
     <a href="https://github.com/Intellindust-AI-Lab/DEIMv2/blob/master/LICENSE">
         <img alt="license" src="https://img.shields.io/badge/LICENSE-Apache%202.0-blue">
