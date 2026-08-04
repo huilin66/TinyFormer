@@ -86,6 +86,33 @@ class FusionTests(unittest.TestCase):
         self.assertTrue(torch.allclose(fused["pred_logits"], torch.full((1, 2, 3), 3.0)))
         self.assertEqual(fused["aux"][0]["x"].item(), 3.0)
 
+    def test_recursive_fusion_preserves_integer_decoder_metadata(self):
+        positive_idx = (torch.tensor([0, 2], dtype=torch.long),)
+        outputs = [
+            {
+                "pred_logits": torch.full((1, 2, 3), value),
+                "dn_meta": {
+                    "dn_positive_idx": tuple(index.clone() for index in positive_idx),
+                    "dn_num_group": 2,
+                    "dn_num_split": [4, 2],
+                },
+            }
+            for value in (1.0, 3.0)
+        ]
+        fused = AddFusion(normalize=True)(outputs)
+        fused_index = fused["dn_meta"]["dn_positive_idx"][0]
+        self.assertEqual(fused_index.dtype, torch.long)
+        self.assertTrue(torch.equal(fused_index, positive_idx[0]))
+        self.assertTrue(torch.allclose(fused["pred_logits"], torch.full((1, 2, 3), 2.0)))
+
+    def test_recursive_fusion_rejects_mismatched_integer_metadata(self):
+        outputs = [
+            {"pred_logits": torch.ones(1), "index": torch.tensor([0], dtype=torch.long)},
+            {"pred_logits": torch.ones(1), "index": torch.tensor([1], dtype=torch.long)},
+        ]
+        with self.assertRaisesRegex(ValueError, "integer/bool tensor metadata"):
+            AddFusion(normalize=True)(outputs)
+
 
 class MultiModalTinyFormerTests(unittest.TestCase):
     def test_all_seven_modes_support_three_modalities(self):

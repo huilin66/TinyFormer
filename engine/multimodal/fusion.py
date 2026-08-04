@@ -37,6 +37,21 @@ class Fusion(nn.Module, ABC):
         if torch.is_tensor(first):
             if not all(torch.is_tensor(item) for item in items):
                 raise TypeError("all fused values must have the same container type")
+            # Decoder output dictionaries contain integer/bool control tensors
+            # such as dn_meta.dn_positive_idx.  They are indices, not features:
+            # averaging them would cast them to float and break criterion
+            # indexing.  Preserve branch-invariant metadata verbatim while
+            # continuing to fuse floating-point predictions and features.
+            if not (first.is_floating_point() or first.is_complex()):
+                if any(
+                    item.dtype != first.dtype
+                    or item.shape != first.shape
+                    or item.device != first.device
+                    or not torch.equal(item, first)
+                    for item in items[1:]
+                ):
+                    raise ValueError("cannot fuse unequal integer/bool tensor metadata")
+                return first
             return self.fuse_tensors(items)
 
         if isinstance(first, Mapping):
