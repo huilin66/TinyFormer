@@ -526,6 +526,11 @@ class DEIMTransformer(nn.Module):
         # input projection and embedding
         memory, spatial_shapes = self._get_encoder_input(feats)
 
+        return self.forward_from_memory(memory, spatial_shapes, targets)
+
+    def forward_from_memory(self, memory, spatial_shapes, targets=None):
+        """Run query selection, transformer layers, and heads on projected memory."""
+
         # prepare denoising training
         if self.training and self.num_denoising > 0:
             denoising_logits, denoising_bbox_unact, attn_mask, dn_meta = \

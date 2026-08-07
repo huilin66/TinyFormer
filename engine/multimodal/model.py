@@ -76,6 +76,35 @@ class BranchBank(nn.Module):
         return [f"{name}.branches.{index}." for index in range(self.count)]
 
 
+class DecoderInputProjector(nn.Module):
+    """Independent DEIM input projection used before decoder-memory fusion."""
+
+    def __init__(self, decoder: nn.Module):
+        super().__init__()
+        if not hasattr(decoder, "input_proj") or not hasattr(decoder, "num_levels"):
+            raise TypeError(
+                "DF requires a decoder exposing input_proj, num_levels, and forward_from_memory()"
+            )
+        self.input_proj = copy.deepcopy(decoder.input_proj)
+        self.num_levels = int(decoder.num_levels)
+
+    def forward(self, feats: Sequence[torch.Tensor]) -> tuple[torch.Tensor, list[list[int]]]:
+        projected = [self.input_proj[index](feat) for index, feat in enumerate(feats)]
+        if self.num_levels > len(projected):
+            original_levels = len(projected)
+            for index in range(original_levels, self.num_levels):
+                source = feats[-1] if index == original_levels else projected[-1]
+                projected.append(self.input_proj[index](source))
+
+        flattened = []
+        spatial_shapes = []
+        for feature in projected:
+            _, _, height, width = feature.shape
+            flattened.append(feature.flatten(2).permute(0, 2, 1))
+            spatial_shapes.append([height, width])
+        return torch.concat(flattened, dim=1), spatial_shapes
+
+
 @register()
 class MultiModalTinyFormer(nn.Module):
     """Compose TinyFormer stages with one of seven multimodal fusion modes."""
@@ -139,11 +168,21 @@ class MultiModalTinyFormer(nn.Module):
         branch_backbone = mode in {"BF", "EF", "NF", "DF", "FF"}
         branch_ssa = mode in {"SF", "EF", "NF", "DF", "FF"}
         branch_neck = mode in {"NF", "DF", "FF"}
-        branch_decoder = mode in {"DF", "FF"}
+        # DF owns one unified decoder after memory fusion. FF still owns one
+        # complete decoder per modality because it fuses final predictions.
+        branch_decoder = mode == "FF"
         self.backbones = BranchBank(backbone, num_modalities if branch_backbone else 1, share_weight)
         self.ssas = BranchBank(ssa, num_modalities if branch_ssa else 1, share_weight)
         self.necks = BranchBank(neck, num_modalities if branch_neck else 1, share_weight)
         self.decoders = BranchBank(decoder, num_modalities if branch_decoder else 1, share_weight)
+        self.decoder_projectors = None
+        if mode == "DF":
+            if not hasattr(decoder, "forward_from_memory"):
+                raise TypeError("DF requires a decoder implementing forward_from_memory()")
+            if num_modalities > 1 and not share_weight:
+                self.decoder_projectors = nn.ModuleList(
+                    DecoderInputProjector(decoder) for _ in range(num_modalities - 1)
+                )
 
         adapter_count = num_modalities if mode != "IF" else 1
         if adapter_count > 1 and share_weight:
@@ -284,6 +323,25 @@ class MultiModalTinyFormer(nn.Module):
             fused_neck = self._fuse(neck_features, branch_images, masks, metadata)
             return self.decoders.at(0)(fused_neck, targets)
 
+        if mode == "DF":
+            decoder = self.decoders.at(0)
+            memories = []
+            spatial_shapes = None
+            for index, features in enumerate(neck_features):
+                if index == 0 or self.decoder_projectors is None:
+                    memory, branch_shapes = decoder._get_encoder_input(features)
+                else:
+                    memory, branch_shapes = self.decoder_projectors[index - 1](features)
+                if spatial_shapes is None:
+                    spatial_shapes = branch_shapes
+                elif branch_shapes != spatial_shapes:
+                    raise ValueError(
+                        "DF decoder projections must produce identical spatial shapes across modalities"
+                    )
+                memories.append(memory)
+            fused_memory = self._fuse(memories, branch_images, masks, metadata)
+            return decoder.forward_from_memory(fused_memory, spatial_shapes, targets)
+
         decoder_outputs = [
             self.decoders.at(index)(features, targets)
             for index, features in enumerate(neck_features)
@@ -313,6 +371,11 @@ class MultiModalTinyFormer(nn.Module):
             elif key.startswith("decoder."):
                 suffix = key[len("decoder.") :]
                 destinations = [prefix + suffix for prefix in self.decoders.state_prefixes("decoders")]
+                if self.fusion_mode == "DF" and suffix.startswith("input_proj."):
+                    destinations.extend(
+                        f"decoder_projectors.{index}.{suffix}"
+                        for index in range(len(self.decoder_projectors or []))
+                    )
             for destination in destinations:
                 remapped[destination] = value
         return remapped

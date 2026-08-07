@@ -40,13 +40,31 @@ class DummyNeck(nn.Module):
 
 
 class DummyDecoder(nn.Module):
-    def forward(self, features, targets=None):
-        del targets
-        pooled = features[0].mean(dim=(-2, -1))
+    def __init__(self):
+        super().__init__()
+        self.num_levels = 3
+        self.input_proj = nn.ModuleList([nn.Identity() for _ in range(self.num_levels)])
+
+    def _get_encoder_input(self, features):
+        flattened = []
+        shapes = []
+        for feature in features:
+            height, width = feature.shape[-2:]
+            flattened.append(feature.flatten(2).permute(0, 2, 1))
+            shapes.append([height, width])
+        return torch.cat(flattened, dim=1), shapes
+
+    def forward_from_memory(self, memory, spatial_shapes, targets=None):
+        del spatial_shapes, targets
+        pooled = memory.mean(dim=1)
         return {
             "pred_logits": pooled.unsqueeze(1),
             "pred_boxes": pooled[:, :1].unsqueeze(1).repeat(1, 1, 4),
         }
+
+    def forward(self, features, targets=None):
+        memory, spatial_shapes = self._get_encoder_input(features)
+        return self.forward_from_memory(memory, spatial_shapes, targets)
 
 
 def build_model(mode, *, num_modalities=3, share_weight=False, channels=None):
@@ -124,6 +142,27 @@ class MultiModalTinyFormerTests(unittest.TestCase):
                 output = model(inputs)
                 self.assertEqual(output["pred_logits"].shape, (2, 1, 3))
                 self.assertEqual(output["pred_boxes"].shape, (2, 1, 4))
+
+    def test_df_fuses_projected_memory_before_one_prediction_head(self):
+        model = build_model("DF", num_modalities=2, share_weight=False)
+        self.assertEqual(model.decoders.count, 1)
+        self.assertEqual(len(model.decoder_projectors), 1)
+        calls = []
+        handle = model.decoders.at(0).register_forward_hook(lambda *args: calls.append("forward"))
+        try:
+            output = model(torch.randn(2, 6, 16, 16))
+        finally:
+            handle.remove()
+        self.assertEqual(calls, [])
+        self.assertEqual(output["pred_boxes"].shape, (2, 1, 4))
+
+    def test_df_tuning_weights_initialize_every_input_projection(self):
+        model = build_model("DF", num_modalities=3, share_weight=False)
+        legacy = {"decoder.input_proj.0.weight": torch.ones(1)}
+        remapped = model.remap_tuning_state_dict(legacy)
+        self.assertIn("decoders.shared.input_proj.0.weight", remapped)
+        self.assertIn("decoder_projectors.0.input_proj.0.weight", remapped)
+        self.assertIn("decoder_projectors.1.input_proj.0.weight", remapped)
 
     def test_n_equals_one_is_supported_by_every_mode(self):
         inputs = torch.randn(2, 3, 16, 16)

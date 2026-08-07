@@ -13,7 +13,7 @@ without changing the original single-modal `DEIM` model or
 | `SF` | One Backbone on the fused image, per-modality SSA, then fuse SSA outputs |
 | `EF` | Per-modality Backbone + SSA, then fuse Encoder outputs |
 | `NF` | Per-modality Backbone + SSA + Neck, then fuse Neck outputs |
-| `DF` | Per-modality paths through Decoder, then fuse the recursive Decoder output mapping |
+| `DF` | Per-modality paths through Decoder input projection, fuse projected memory, then run one shared query selection, Transformer Decoder, and prediction head |
 | `FF` | Complete per-modality paths and a separately configurable final fusion operator |
 
 The model accepts any `num_modalities >= 1`. Inputs may be supplied as:
