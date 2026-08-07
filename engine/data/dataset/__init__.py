@@ -11,6 +11,7 @@ from .coco_dataset import (
     mscoco_label2category,
 )
 from .paired_coco_dataset import PairedCocoDetection
+from .multimodal_coco_dataset import MultiModalCocoDetection
 from .coco_eval import CocoEvaluator
 from .coco_utils import get_coco_api_from_dataset
 from .voc_detection import VOCDetection
