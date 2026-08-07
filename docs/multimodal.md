@@ -14,7 +14,7 @@ without changing the original single-modal `DEIM` model or
 | `EF` | Per-modality Backbone + SSA, then fuse Encoder outputs |
 | `NF` | Per-modality Backbone + SSA + Neck, then fuse Neck outputs |
 | `DF` | Per-modality paths through Decoder input projection, fuse projected memory, then run one shared query selection, Transformer Decoder, and prediction head |
-| `FF` | Complete per-modality paths and a separately configurable final fusion operator |
+| `FF` | Complete per-modality paths, concatenate independent prediction queries, then perform unified matching and Top-K selection |
 
 The model accepts any `num_modalities >= 1`. Inputs may be supplied as:
 
@@ -41,7 +41,7 @@ MultiModalTinyFormer:
   share_weight: false
   fusion: {type: AddFusion, normalize: true}
   image_fusion: {type: ConcatFusion, dim: 1}
-  final_fusion: {type: AddFusion, normalize: true}
+  final_fusion: {type: DetectionQueryFusion}
 ```
 
 `share_weight: true` reuses the same module object for every branch before the
@@ -62,9 +62,12 @@ fused = fusion(features, images=None, masks=None, metadata=None)
 ```
 
 `AddFusion` and `ConcatFusion` recursively support tensors, multi-scale tuples,
-decoder dictionaries, and auxiliary-output lists. `ConcatFusion` changes the
-channel/query dimension, so the next stage must be configured for the enlarged
-dimension. `AddFusion(normalize=true)` preserves shapes by averaging branches.
+decoder dictionaries, and auxiliary-output lists. `DetectionQueryFusion` is
+the FF operator: it concatenates independent predictions along the query
+dimension and offsets denoising indices for the combined layout. This avoids
+averaging unrelated queries from different modality branches. `ConcatFusion`
+changes the channel/query dimension, while `AddFusion(normalize=true)`
+preserves shapes by averaging branches.
 
 Custom fusion methods can subclass `Fusion`, override `fuse_tensors()` for a
 basic tensor operator, or override `forward()` when they require images, masks,

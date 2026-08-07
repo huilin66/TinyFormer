@@ -134,4 +134,133 @@ class ConcatFusion(Fusion):
         return sum(input_channels) if self.dim == 1 else None
 
 
-__all__ = ["Fusion", "AddFusion", "ConcatFusion"]
+@register()
+class DetectionQueryFusion(Fusion):
+    """Merge independent detector outputs without assuming query alignment.
+
+    Prediction tensors are concatenated along the query dimension. Training
+    metadata is preserved, and contrastive-denoising indices are offset to the
+    concatenated branch layout so the standard criterion remains valid.
+    """
+
+    _QUERY_KEYS = {
+        "pred_logits",
+        "pred_boxes",
+        "pred_corners",
+        "ref_points",
+        "teacher_corners",
+        "teacher_logits",
+    }
+
+    def forward(
+        self,
+        features: Sequence[Any],
+        images: Sequence[torch.Tensor] | None = None,
+        masks: Any = None,
+        metadata: Any = None,
+    ) -> Any:
+        del images, masks, metadata
+        outputs = list(features)
+        if not outputs:
+            raise ValueError("detection fusion requires at least one branch output")
+        if not all(isinstance(output, Mapping) for output in outputs):
+            raise TypeError("DetectionQueryFusion requires decoder output mappings")
+        return self._merge_mapping(outputs)
+
+    def _merge_mapping(self, items: list[Mapping[str, Any]]) -> Mapping[str, Any]:
+        keys = list(items[0].keys())
+        if any(set(item.keys()) != set(keys) for item in items[1:]):
+            raise ValueError("all detection branches must expose identical output keys")
+        merged = []
+        for key in keys:
+            values = [item[key] for item in items]
+            if key == "dn_meta":
+                value = self._merge_dn_meta(values)
+            else:
+                value = self._merge_value(key, values)
+            merged.append((key, value))
+        return type(items[0])(merged)
+
+    def _merge_value(self, key: str, items: list[Any]) -> Any:
+        first = items[0]
+        if torch.is_tensor(first):
+            if not all(torch.is_tensor(item) for item in items):
+                raise TypeError(f"inconsistent detection output types for {key}")
+            if key in self._QUERY_KEYS:
+                reference = first.shape
+                if first.ndim < 2 or any(
+                    item.ndim != first.ndim
+                    or item.shape[0] != reference[0]
+                    or item.shape[2:] != reference[2:]
+                    for item in items[1:]
+                ):
+                    raise ValueError(f"cannot concatenate incompatible query tensors for {key}")
+                return torch.cat(items, dim=1)
+            if any(
+                item.dtype != first.dtype
+                or item.shape != first.shape
+                or item.device != first.device
+                or not torch.equal(item, first)
+                for item in items[1:]
+            ):
+                raise ValueError(f"branch metadata tensor {key!r} must be identical")
+            return first
+        if isinstance(first, Mapping):
+            if not all(isinstance(item, Mapping) for item in items):
+                raise TypeError(f"inconsistent detection output mappings for {key}")
+            return self._merge_mapping(items)
+        if isinstance(first, tuple):
+            self._validate_sequence_shapes(items)
+            return tuple(
+                self._merge_value(key, [item[index] for item in items])
+                for index in range(len(first))
+            )
+        if isinstance(first, list):
+            self._validate_sequence_shapes(items)
+            return [
+                self._merge_value(key, [item[index] for item in items])
+                for index in range(len(first))
+            ]
+        if not all(item == first for item in items[1:]):
+            raise ValueError(f"branch metadata {key!r} must be identical")
+        return first
+
+    @staticmethod
+    def _merge_dn_meta(items: list[Mapping[str, Any]]) -> dict[str, Any]:
+        first = items[0]
+        required = {"dn_positive_idx", "dn_num_group", "dn_num_split"}
+        if any(not isinstance(item, Mapping) or not required.issubset(item) for item in items):
+            raise ValueError("every FF branch must expose complete dn_meta")
+        batch_size = len(first["dn_positive_idx"])
+        if any(len(item["dn_positive_idx"]) != batch_size for item in items[1:]):
+            raise ValueError("FF branches have inconsistent denoising batch metadata")
+
+        combined_indices = [[] for _ in range(batch_size)]
+        dn_offset = 0
+        total_dn = 0
+        total_queries = 0
+        total_groups = 0
+        for item in items:
+            dn_count, query_count = (int(value) for value in item["dn_num_split"])
+            for batch_index, indices in enumerate(item["dn_positive_idx"]):
+                combined_indices[batch_index].append(indices + dn_offset)
+            dn_offset += dn_count
+            total_dn += dn_count
+            total_queries += query_count
+            total_groups += int(item["dn_num_group"])
+
+        merged = dict(first)
+        merged["dn_positive_idx"] = tuple(
+            torch.cat(parts) if parts else torch.empty(0, dtype=torch.long)
+            for parts in combined_indices
+        )
+        merged["dn_num_group"] = total_groups
+        merged["dn_num_split"] = [total_dn, total_queries]
+        return merged
+
+    def fuse_tensors(self, features: Sequence[torch.Tensor]) -> torch.Tensor:
+        """Fallback tensor interface: concatenate detector queries."""
+        return torch.cat(list(features), dim=1)
+
+
+__all__ = ["Fusion", "AddFusion", "ConcatFusion", "DetectionQueryFusion"]

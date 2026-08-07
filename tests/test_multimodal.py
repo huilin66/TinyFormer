@@ -17,6 +17,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
 from engine.multimodal import (  # noqa: E402
     AddFusion,
     ConcatFusion,
+    DetectionQueryFusion,
     FUSION_MODES,
     MultiModalTinyFormer,
     SSA4ScaleStage,
@@ -75,7 +76,7 @@ def build_model(mode, *, num_modalities=3, share_weight=False, channels=None):
         decoder=DummyDecoder(),
         fusion=AddFusion(normalize=True),
         image_fusion=ConcatFusion(dim=1),
-        final_fusion=AddFusion(normalize=True),
+        final_fusion=DetectionQueryFusion(),
         fusion_mode=mode,
         num_modalities=num_modalities,
         modality_channels=channels or [3] * num_modalities,
@@ -131,6 +132,41 @@ class FusionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "integer/bool tensor metadata"):
             AddFusion(normalize=True)(outputs)
 
+    def test_final_fusion_concatenates_unaligned_queries(self):
+        outputs = [
+            {
+                "pred_logits": torch.full((1, 2, 3), value),
+                "pred_boxes": torch.full((1, 2, 4), value),
+            }
+            for value in (1.0, 3.0)
+        ]
+        fused = DetectionQueryFusion()(outputs)
+        self.assertEqual(fused["pred_logits"].shape, (1, 4, 3))
+        self.assertTrue(torch.equal(fused["pred_logits"][:, :2], outputs[0]["pred_logits"]))
+        self.assertTrue(torch.equal(fused["pred_logits"][:, 2:], outputs[1]["pred_logits"]))
+
+    def test_final_fusion_offsets_denoising_indices(self):
+        outputs = []
+        for value in (1.0, 2.0):
+            outputs.append(
+                {
+                    "pred_logits": torch.full((1, 2, 3), value),
+                    "dn_outputs": [{"pred_logits": torch.full((1, 4, 3), value)}],
+                    "dn_meta": {
+                        "dn_positive_idx": (torch.tensor([0, 2]),),
+                        "dn_num_group": 2,
+                        "dn_num_split": [4, 2],
+                    },
+                }
+            )
+        fused = DetectionQueryFusion()(outputs)
+        self.assertEqual(fused["dn_outputs"][0]["pred_logits"].shape[1], 8)
+        self.assertTrue(
+            torch.equal(fused["dn_meta"]["dn_positive_idx"][0], torch.tensor([0, 2, 4, 6]))
+        )
+        self.assertEqual(fused["dn_meta"]["dn_num_group"], 4)
+        self.assertEqual(fused["dn_meta"]["dn_num_split"], [8, 4])
+
 
 class MultiModalTinyFormerTests(unittest.TestCase):
     def test_all_seven_modes_support_three_modalities(self):
@@ -140,8 +176,9 @@ class MultiModalTinyFormerTests(unittest.TestCase):
                 model = build_model(mode)
                 self.assertEqual(model.input_channels, 9)
                 output = model(inputs)
-                self.assertEqual(output["pred_logits"].shape, (2, 1, 3))
-                self.assertEqual(output["pred_boxes"].shape, (2, 1, 4))
+                expected_queries = 3 if mode == "FF" else 1
+                self.assertEqual(output["pred_logits"].shape, (2, expected_queries, 3))
+                self.assertEqual(output["pred_boxes"].shape, (2, expected_queries, 4))
 
     def test_df_fuses_projected_memory_before_one_prediction_head(self):
         model = build_model("DF", num_modalities=2, share_weight=False)

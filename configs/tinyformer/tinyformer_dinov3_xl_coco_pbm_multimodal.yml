@@ -24,7 +24,7 @@ MultiModalTinyFormer:
   decoder: DEIMTransformer
   fusion: {type: AddFusion, normalize: true}
   image_fusion: {type: ConcatFusion, dim: 1}
-  final_fusion: {type: AddFusion, normalize: true}
+  final_fusion: {type: DetectionQueryFusion}
 
 DINOv3BackboneStage:
   name: dinov3_vitb16
