@@ -28,7 +28,13 @@ class MultiModalCocoDetection(CocoDetection):
         transforms,
         return_masks=False,
         remap_mscoco_category=False,
+        img_folder=None,
     ):
+        # The multimodal YAML inherits coco_detection.yml, whose dataset block
+        # contributes the legacy single-image ``img_folder`` key.  Workspace
+        # configuration merging keeps that key alongside ``img_folders``.
+        # Accept it for compatibility, but never use it as a modality source.
+        del img_folder
         folders = [Path(path) for path in img_folders]
         if not folders:
             raise ValueError("img_folders must contain at least one modality folder")

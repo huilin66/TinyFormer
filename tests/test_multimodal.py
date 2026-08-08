@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+import inspect
 from pathlib import Path
 
 import torch
@@ -22,6 +23,7 @@ from engine.multimodal import (  # noqa: E402
     MultiModalTinyFormer,
     SSA4ScaleStage,
 )
+from engine.data.dataset import MultiModalCocoDetection  # noqa: E402
 
 
 class DummyBackbone(nn.Module):
@@ -169,6 +171,11 @@ class FusionTests(unittest.TestCase):
 
 
 class MultiModalTinyFormerTests(unittest.TestCase):
+    def test_multimodal_dataset_accepts_inherited_single_image_folder_key(self):
+        parameters = inspect.signature(MultiModalCocoDetection.__init__).parameters
+        self.assertIn("img_folder", parameters)
+        self.assertIn("img_folders", parameters)
+
     def test_all_seven_modes_support_three_modalities(self):
         inputs = torch.randn(2, 9, 16, 16)
         for mode in FUSION_MODES:
