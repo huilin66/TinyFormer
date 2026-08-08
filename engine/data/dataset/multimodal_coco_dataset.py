@@ -83,11 +83,16 @@ class MultiModalCocoDetection(CocoDetection):
 
         if self._transforms is not None:
             initial_state = self._rng_state()
+            original_target = copy.deepcopy(target)
             advanced_state = None
             transformed = []
             for index, image in enumerate(images):
                 self._set_rng_state(initial_state)
-                image_target = copy.deepcopy(target)
+                # Replay every modality from the same raw target. The first
+                # pass converts BoundingBoxes to a plain Tensor near the end
+                # of the pipeline, which is not a valid input to a second
+                # pass through the earlier box-aware transforms.
+                image_target = copy.deepcopy(original_target)
                 image, transformed_target, _ = self._transforms(image, image_target, self)
                 if index == 0:
                     target = transformed_target

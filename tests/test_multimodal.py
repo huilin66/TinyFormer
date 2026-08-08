@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-import sys
-import unittest
 import inspect
+import sys
+import tempfile
+import unittest
 from pathlib import Path
 
 import torch
 import torch.nn as nn
+from PIL import Image
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -175,6 +177,47 @@ class MultiModalTinyFormerTests(unittest.TestCase):
         parameters = inspect.signature(MultiModalCocoDetection.__init__).parameters
         self.assertIn("img_folder", parameters)
         self.assertIn("img_folders", parameters)
+
+    def test_multimodal_dataset_replays_each_transform_from_raw_target(self):
+        class FakeCoco:
+            @staticmethod
+            def loadImgs(_):
+                return [{"file_name": "sample.png"}]
+
+        class MutatingTransform:
+            def __init__(self):
+                self.input_stages = []
+
+            def __call__(self, image, target, dataset):
+                del image, dataset
+                self.input_stages.append(target["stage"])
+                target["stage"] += 1
+                return torch.zeros(3, 4, 4), target, None
+
+        with tempfile.TemporaryDirectory() as directory:
+            roots = []
+            indices = []
+            for modality in range(3):
+                root = Path(directory) / str(modality)
+                root.mkdir()
+                path = root / "sample.png"
+                Image.new("RGB", (4, 4)).save(path)
+                roots.append(root)
+                indices.append({"sample": path})
+
+            dataset = MultiModalCocoDetection.__new__(MultiModalCocoDetection)
+            dataset.img_folders = roots
+            dataset._images_by_stem = indices
+            dataset.ids = [1]
+            dataset.coco = FakeCoco()
+            dataset.load_item = lambda _: (None, {"stage": 0})
+            transform = MutatingTransform()
+            dataset._transforms = transform
+
+            images, target = dataset[0]
+            self.assertEqual(transform.input_stages, [0, 0, 0])
+            self.assertEqual(images.shape, (9, 4, 4))
+            self.assertEqual(target["stage"], 1)
 
     def test_all_seven_modes_support_three_modalities(self):
         inputs = torch.randn(2, 9, 16, 16)
