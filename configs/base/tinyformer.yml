@@ -7,6 +7,8 @@ postprocessor: PostProcessor
 use_focal_loss: True
 eval_spatial_size: [640, 640] # h w
 checkpoint_freq: 5    # save freq
+# Keep only best_stg1.pth, best_stg2.pth, and last.pth after a complete run.
+cleanup_checkpoints: True
 
 DEIM:
 

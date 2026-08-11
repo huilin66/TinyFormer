@@ -74,6 +74,11 @@ class BaseConfig(object):
         self.seed :int = None
         self.print_freq :int = None
         self.checkpoint_freq :int = 1
+        # Remove numbered epoch checkpoints after a successful full training
+        # run while retaining best_stg1.pth, best_stg2.pth, and last.pth.
+        # TinyFormer's base YAML enables this explicitly; keeping the Python
+        # default disabled avoids changing manually constructed configs.
+        self.cleanup_checkpoints :bool = False
         self.output_dir :str = None
         self.summary_dir :str = None
         self.device : str = ''

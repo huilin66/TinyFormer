@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict
 import atexit
+import re
 
 from ..misc import dist_utils
 from ..core import BaseConfig
@@ -76,6 +77,42 @@ class BaseSolver(object):
     def cleanup(self):
         if self.writer:
             atexit.register(self.writer.close)
+
+    def cleanup_epoch_checkpoints(self):
+        """Remove numbered epoch checkpoints after a successful full run.
+
+        ``last.pth`` and the stage-best checkpoints are deliberately not
+        touched because they are the three supported recovery/submission
+        artifacts.  Cleanup is called only after ``fit`` reaches its normal
+        end; an exception or interruption therefore leaves intermediate
+        checkpoints available for recovery.
+        """
+        if not getattr(self.cfg, 'cleanup_checkpoints', False):
+            return []
+        if not self.output_dir or not dist_utils.is_main_process():
+            return []
+
+        numbered_checkpoint = re.compile(r'^checkpoint\d+\.pth$')
+        removed = []
+        for path in sorted(self.output_dir.glob('checkpoint*.pth')):
+            if not path.is_file() or not numbered_checkpoint.fullmatch(path.name):
+                continue
+            try:
+                path.unlink()
+            except OSError as error:
+                print(f'Checkpoint cleanup skipped {path.name}: {error}')
+                continue
+            removed.append(path)
+
+        kept = [
+            name for name in ('best_stg1.pth', 'best_stg2.pth', 'last.pth')
+            if (self.output_dir / name).is_file()
+        ]
+        print(
+            f'Checkpoint cleanup: removed {len(removed)} numbered epoch checkpoint(s); '
+            f'kept {", ".join(kept) if kept else "no final checkpoints found"}.'
+        )
+        return removed
 
     def train(self):
         self._setup()
