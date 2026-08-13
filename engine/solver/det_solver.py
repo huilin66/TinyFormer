@@ -101,7 +101,11 @@ class DetSolver(BaseSolver):
                 if self.lr_warmup_scheduler is None or self.lr_warmup_scheduler.finished():
                     self.lr_scheduler.step()
 
-            self.last_epoch += 1
+            # The stage-transition refresh below may load best_stg1.pth and
+            # reset the solver's in-memory last_epoch.  The loop epoch is the
+            # authoritative completed epoch, so do not derive it by
+            # incrementing potentially stale checkpoint state.
+            self.last_epoch = epoch
 
             # Always keep a resumable checkpoint for the most recently
             # completed training epoch. Previously this block stopped running

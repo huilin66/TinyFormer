@@ -100,9 +100,11 @@ class DetSolver(BaseSolver):
                 if self.lr_warmup_scheduler is None or self.lr_warmup_scheduler.finished():
                     self.lr_scheduler.step()
 
-            self.last_epoch += 1
+            # Keep checkpoint metadata aligned with the actual loop epoch;
+            # stage refreshes can otherwise reset last_epoch to an old value.
+            self.last_epoch = epoch
 
-            if self.output_dir and epoch < self.train_dataloader.collate_fn.stop_epoch:
+            if self.output_dir:
                 checkpoint_paths = [self.output_dir / 'last.pth']
                 if (epoch + 1) % args.checkpoint_freq == 0:
                     checkpoint_paths.append(self.output_dir / f'checkpoint{epoch:04}.pth')
