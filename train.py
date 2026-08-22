@@ -12,6 +12,12 @@ Copyright (c) 2023 lyuwenyu. All Rights Reserved.
 import os
 #os.environ['CUDA_VISIBLE_DEVICES']='7'
 import sys
+
+# This environment variable is read by cuBLAS during CUDA initialization, so
+# set it before importing the TinyFormer engine (which imports torch).
+if '--deterministic' in sys.argv:
+    os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
 import argparse
@@ -32,7 +38,12 @@ if debug:
 def main(args, ) -> None:
     """main
     """
-    dist_utils.setup_distributed(args.print_rank, args.print_method, seed=args.seed)
+    dist_utils.setup_distributed(
+        args.print_rank,
+        args.print_method,
+        seed=args.seed,
+        deterministic=args.deterministic,
+    )
 
     assert not all([args.tuning, args.resume]), \
         'Only support from_scrach or resume or tuning at one time'
@@ -70,6 +81,12 @@ if __name__ == '__main__':
     parser.add_argument('-t', '--tuning',type=str, help='tuning from checkpoint')
     parser.add_argument('-d', '--device', type=str, help='device',)
     parser.add_argument('--seed', type=int, default=0, help='exp reproducibility')
+    parser.add_argument(
+        '--deterministic',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='enable deterministic PyTorch/CUDA algorithms (slower; default: false)',
+    )
     parser.add_argument('--use-amp', action='store_true', help='auto mixed precision training')
     parser.add_argument('--output-dir', type=str, help='output directoy')
     parser.add_argument('--summary-dir', type=str, help='tensorboard summry')

@@ -72,6 +72,7 @@ class BaseConfig(object):
         self.find_unused_parameters :bool = None
 
         self.seed :int = None
+        self.deterministic :bool = False
         self.print_freq :int = None
         self.checkpoint_freq :int = 1
         # Remove numbered epoch checkpoints after a successful full training

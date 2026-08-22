@@ -163,6 +163,11 @@ class BaseSolver(object):
                 v = dist_utils.de_parallel(v)
                 state[k] = v.state_dict()
 
+        # Keep RNG streams in the resumable checkpoint. This is required for
+        # a resumed run to consume the same augmentations and dropout masks as
+        # an uninterrupted run.
+        state['rng_state'] = dist_utils.capture_rng_state()
+
         return state
 
     def load_state_dict(self, state):
@@ -188,12 +193,23 @@ class BaseSolver(object):
                 else:
                     print(f'Not load {k}.state_dict')
 
+        if 'rng_state' in state:
+            if dist_utils.restore_rng_state(state['rng_state']):
+                print('Load rng_state')
+            else:
+                print('Warning: checkpoint RNG state is incompatible; continuing with seeded streams.')
+        else:
+            print('Warning: checkpoint has no rng_state; exact resume reproducibility is unavailable.')
+
     def load_resume_state(self, path: str):
         """Load resume"""
         if path.startswith('http'):
             state = torch.hub.load_state_dict_from_url(path, map_location='cpu')
         else:
-            state = torch.load(path, map_location='cpu')
+            try:
+                state = torch.load(path, map_location='cpu', weights_only=False)
+            except TypeError:
+                state = torch.load(path, map_location='cpu')
 
         # state['model'] = remove_module_prefix(state['model'])
         self.load_state_dict(state)

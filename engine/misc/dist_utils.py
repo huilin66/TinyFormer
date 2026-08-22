@@ -26,13 +26,19 @@ from torch.utils.data import DistributedSampler
 from ..data import DataLoader
 
 
-def setup_distributed(print_rank: int=0, print_method: str='builtin', seed: int=None, ):
+def setup_distributed(
+    print_rank: int = 0,
+    print_method: str = 'builtin',
+    seed: int = None,
+    deterministic: bool = False,
+):
     """
     env setup
     args:
         print_rank,
         print_method, (builtin, rich)
         seed,
+        deterministic, enable deterministic CUDA/PyTorch algorithms when true,
     """
     try:
         # https://pytorch.org/docs/stable/elastic/run.html
@@ -57,7 +63,7 @@ def setup_distributed(print_rank: int=0, print_method: str='builtin', seed: int=
 
     setup_print(get_rank() == print_rank, method=print_method)
     if seed is not None:
-        setup_seed(seed)
+        setup_seed(seed, deterministic=deterministic)
 
     return enabled_dist
 
@@ -227,7 +233,7 @@ def sync_time():
 
 
 
-def setup_seed(seed: int, deterministic=False):
+def setup_seed(seed: int, deterministic: bool = False):
     """setup_seed for reproducibility
     torch.manual_seed(3407) is all you need. https://arxiv.org/abs/2109.08203
     """
@@ -239,9 +245,83 @@ def setup_seed(seed: int, deterministic=False):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-    # memory will be large when setting deterministic to True
-    if torch.backends.cudnn.is_available() and deterministic:
-        torch.backends.cudnn.deterministic = True
+    if deterministic:
+        # CUBLAS_WORKSPACE_CONFIG must be present before the first CUDA
+        # matmul. The root launcher sets it before spawning train.py; keep
+        # this fallback here as well for direct ``python train.py`` usage.
+        os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')
+
+        # Disable algorithm/autotuner choices that can vary between runs.
+        if torch.backends.cudnn.is_available():
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+            if hasattr(torch.backends.cudnn, 'allow_tf32'):
+                torch.backends.cudnn.allow_tf32 = False
+        if hasattr(torch.backends, 'cuda') and hasattr(torch.backends.cuda, 'matmul'):
+            torch.backends.cuda.matmul.allow_tf32 = False
+        if hasattr(torch, 'set_float32_matmul_precision'):
+            torch.set_float32_matmul_precision('highest')
+
+        # TinyFormer's deformable-attention extension contains CUDA backward
+        # paths for which PyTorch cannot promise a deterministic kernel on all
+        # versions. ``warn_only`` keeps the training job runnable while
+        # enabling deterministic kernels everywhere PyTorch supports them.
+        # PyTorch emits a warning if it encounters an unsupported operation.
+        try:
+            torch.use_deterministic_algorithms(True, warn_only=True)
+        except TypeError:  # compatibility with older PyTorch releases
+            torch.use_deterministic_algorithms(True)
+
+
+def capture_rng_state():
+    """Capture Python, NumPy, CPU and CUDA RNG states for checkpoint resume."""
+
+    local_state = {
+        'python': random.getstate(),
+        'numpy': np.random.get_state(),
+        'torch': torch.random.get_rng_state(),
+    }
+    if torch.cuda.is_available():
+        local_state['cuda'] = torch.cuda.get_rng_state_all()
+
+    # Checkpoints are produced by every rank (``save_on_master`` only filters
+    # the final write), so retain one RNG snapshot per rank when distributed.
+    if is_dist_available_and_initialized():
+        return {
+            'version': 1,
+            'world_size': get_world_size(),
+            'rank_states': all_gather(local_state),
+        }
+    return {'version': 1, 'world_size': 1, 'rank_states': [local_state]}
+
+
+def restore_rng_state(state) -> bool:
+    """Restore the current rank's RNG state from a checkpoint snapshot."""
+
+    if not isinstance(state, dict):
+        return False
+    rank_states = state.get('rank_states')
+    if isinstance(rank_states, list):
+        rank = get_rank()
+        if rank >= len(rank_states):
+            return False
+        state = rank_states[rank]
+    if not isinstance(state, dict):
+        return False
+
+    try:
+        if 'python' in state:
+            random.setstate(state['python'])
+        if 'numpy' in state:
+            np.random.set_state(state['numpy'])
+        if 'torch' in state:
+            torch.random.set_rng_state(state['torch'])
+        if torch.cuda.is_available() and state.get('cuda') is not None:
+            torch.cuda.set_rng_state_all(state['cuda'])
+    except (TypeError, ValueError, RuntimeError) as error:
+        print(f'Warning: could not restore complete RNG state: {error}')
+        return False
+    return True
 
 
 # for torch.compile
