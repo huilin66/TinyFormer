@@ -88,6 +88,7 @@ if __name__ == '__main__':
         help='enable deterministic PyTorch/CUDA algorithms (slower; default: false)',
     )
     parser.add_argument('--use-amp', action='store_true', help='auto mixed precision training')
+    parser.add_argument('--stop-epoch', type=int, help='stop after this many completed epochs while keeping the configured scheduler total')
     parser.add_argument('--output-dir', type=str, help='output directoy')
     parser.add_argument('--summary-dir', type=str, help='tensorboard summry')
     parser.add_argument('--test-only', action='store_true', default=False,)

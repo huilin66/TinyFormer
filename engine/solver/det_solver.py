@@ -68,7 +68,18 @@ class DetSolver(BaseSolver):
         best_stat_print = best_stat.copy()
         start_time = time.time()
         start_epoch = self.last_epoch + 1
-        for epoch in range(start_epoch, args.epoches):
+        stop_epoch = args.epoches if args.stop_epoch is None else int(args.stop_epoch)
+        if not 1 <= stop_epoch <= args.epoches:
+            raise ValueError(
+                f"stop_epoch must be between 1 and epoches ({args.epoches}), got {stop_epoch}"
+            )
+        if stop_epoch < args.epoches:
+            print(
+                f"Early-stop limit: running {stop_epoch} completed epochs "
+                f"with a {args.epoches}-epoch scheduler.",
+                flush=True,
+            )
+        for epoch in range(start_epoch, stop_epoch):
 
             self.train_dataloader.set_epoch(epoch)
             # self.train_dataloader.dataset.set_epoch(epoch)
@@ -195,7 +206,14 @@ class DetSolver(BaseSolver):
         total_time = time.time() - start_time
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
         print('Training time {}'.format(total_time_str))
-        self.cleanup_epoch_checkpoints()
+        if stop_epoch < args.epoches:
+            print(
+                f"Stopped after {stop_epoch} completed epochs; "
+                f"resume with stop_epoch unset to continue to {args.epoches}.",
+                flush=True,
+            )
+        else:
+            self.cleanup_epoch_checkpoints()
 
 
     def val(self, ):

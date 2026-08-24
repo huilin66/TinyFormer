@@ -55,6 +55,8 @@ class BaseConfig(object):
         self.tuning :str = None
 
         self.epoches :int = None
+        # Optional execution limit; the scheduler still uses ``epoches``.
+        self.stop_epoch :int = None
         self.last_epoch :int = -1
 
         self.lrsheduler: str = None
