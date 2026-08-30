@@ -59,7 +59,7 @@ class PairedCocoDetection(CocoDetection):
         np.random.set_state(numpy_state)
         torch.random.set_rng_state(torch_state)
 
-    def __getitem__(self, idx):
+    def _load_aligned_images(self, idx):
         primary, target = self.load_item(idx)
         file_name = Path(self.coco.loadImgs(self.ids[idx])[0]["file_name"])
         relative_stem = (file_name.parent / file_name.stem).as_posix()
@@ -77,24 +77,45 @@ class PairedCocoDetection(CocoDetection):
                 f"Aligned image sizes differ for {file_name}: primary={primary.size}, "
                 f"auxiliary={auxiliary.size}"
             )
+        return [primary, auxiliary], target
+
+    def load_multimodal_item(self, idx):
+        """Load one raw aligned pair for the synchronized Mosaic path."""
+
+        return self._load_aligned_images(idx)
+
+    def __getitem__(self, idx):
+        images, target = self.load_multimodal_item(idx)
 
         if self._transforms is not None:
-            initial_state = self._rng_state()
-            original_target = copy.deepcopy(target)
-            primary, target, _ = self._transforms(primary, target, self)
-            advanced_state = self._rng_state()
-            self._set_rng_state(initial_state)
-            auxiliary, _, _ = self._transforms(auxiliary, original_target, self)
-            self._set_rng_state(advanced_state)
+            multimodal_forward = getattr(self._transforms, "forward_multimodal", None)
+            if callable(multimodal_forward):
+                images, target, _ = multimodal_forward(images, target, self)
+            else:
+                initial_state = self._rng_state()
+                original_target = copy.deepcopy(target)
+                advanced_state = None
+                transformed = []
+                for index, image in enumerate(images):
+                    self._set_rng_state(initial_state)
+                    image_target = copy.deepcopy(original_target)
+                    image, transformed_target, _ = self._transforms(image, image_target, self)
+                    if index == 0:
+                        target = transformed_target
+                        advanced_state = self._rng_state()
+                    transformed.append(image)
+                if advanced_state is not None:
+                    self._set_rng_state(advanced_state)
+                images = transformed
 
-        if not torch.is_tensor(primary) or not torch.is_tensor(auxiliary):
+        if any(not torch.is_tensor(image) for image in images):
             raise TypeError("PairedCocoDetection transforms must convert both images to tensors")
-        if primary.shape[1:] != auxiliary.shape[1:]:
+        if images[0].shape[1:] != images[1].shape[1:]:
             raise RuntimeError(
                 f"Synchronized transforms produced different shapes: "
-                f"primary={tuple(primary.shape)}, auxiliary={tuple(auxiliary.shape)}"
+                f"primary={tuple(images[0].shape)}, auxiliary={tuple(images[1].shape)}"
             )
-        return torch.cat((primary, auxiliary), dim=0), target
+        return torch.cat(images, dim=0), target
 
     def extra_repr(self) -> str:
         return super().extra_repr() + f"\n auxiliary_img_folder: {self.auxiliary_img_folder}\n"

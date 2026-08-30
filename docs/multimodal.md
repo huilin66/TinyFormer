@@ -53,6 +53,13 @@ pipeline. A multimodal training dataset must emit one of the accepted input
 forms above and must apply identical geometric augmentation to aligned
 modalities. The model itself is independent of dataset naming and layout.
 
+When a multimodal dataset uses `Compose` with `Mosaic`, the dataset dispatches
+through the multimodal transform protocol. `Mosaic` caches complete aligned
+image bundles and replays one shared affine transform for every modality; it
+never reuses the single-image cache or samples extra images from only the first
+modality folder. Single-modal datasets continue to use the original `Mosaic`
+path.
+
 ## Fusion interface
 
 Every fusion module follows:

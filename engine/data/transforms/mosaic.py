@@ -3,10 +3,12 @@ DEIM: DETR with Improved Matching for Fast Convergence
 Copyright (c) 2024 The DEIM Authors. All Rights Reserved.
 """
 
+import copy
+import random
+
 import torch
 import torchvision.transforms.v2 as T
 import torchvision.transforms.v2.functional as F
-import random
 from PIL import Image
 
 from .._misc import convert_to_tv_tensor
@@ -42,6 +44,10 @@ class Mosaic(T.Transform):
                                                scale=scaling_range, fill=fill_value)
         self.use_cache = use_cache
         self.mosaic_cache = []
+        # A separate cache is required for multimodal samples.  The original
+        # cache stores one image at a time, so replaying Mosaic for RGB/IR/depth
+        # would otherwise mix unrelated modalities into one mosaic.
+        self.multimodal_cache = []
         self.max_cached_images = max_cached_images
         self.random_pop = random_pop
 
@@ -129,7 +135,169 @@ class Mosaic(T.Transform):
 
     @staticmethod
     def _clone(tensor_dict):
-        return {key: value.clone() for (key, value) in tensor_dict.items()}
+        return {
+            key: value.clone() if hasattr(value, "clone") else copy.deepcopy(value)
+            for (key, value) in tensor_dict.items()
+        }
+
+    def _resize_multimodal_sample(self, images, target):
+        """Resize an aligned image bundle once while transforming its target."""
+
+        resized_images = []
+        resized_target = None
+        for index, image in enumerate(images):
+            if index == 0:
+                resized_image, resized_target = self.resize(image, copy.deepcopy(target))
+            else:
+                resized_image = self.resize(image)
+            resized_images.append(resized_image)
+        return resized_images, resized_target
+
+    def _load_multimodal_samples_from_dataset(self, images, target, dataset):
+        """Load four aligned samples without applying their transforms twice."""
+
+        resized_images, resized_target = self._resize_multimodal_sample(images, target)
+        samples = [{"images": resized_images, "labels": resized_target}]
+        sample_indices = random.choices(range(len(dataset)), k=3)
+        for index in sample_indices:
+            sample_images, sample_target = dataset.load_multimodal_item(index)
+            sample_images, sample_target = self._resize_multimodal_sample(sample_images, sample_target)
+            samples.append({"images": sample_images, "labels": sample_target})
+        return samples
+
+    def _load_multimodal_samples_from_cache(self, images, target):
+        """Cache complete aligned modality bundles, never individual images."""
+
+        resized_images, resized_target = self._resize_multimodal_sample(images, target)
+        self.multimodal_cache.append(
+            {
+                "images": [image.copy() for image in resized_images],
+                "labels": self._clone(resized_target),
+            }
+        )
+        cache = self.multimodal_cache
+        if len(cache) > self.max_cached_images:
+            if self.random_pop:
+                index = random.randint(0, len(cache) - 2)  # keep the current sample
+            else:
+                index = 0
+            cache.pop(index)
+
+        sample_indices = random.choices(range(len(cache)), k=3)
+        samples = [
+            {
+                "images": [image.copy() for image in cache[index]["images"]],
+                "labels": self._clone(cache[index]["labels"]),
+            }
+            for index in sample_indices
+        ]
+        samples.insert(
+            0,
+            {
+                "images": [image.copy() for image in resized_images],
+                "labels": self._clone(resized_target),
+            },
+        )
+        return samples
+
+    def create_multimodal_mosaic(self, samples, max_height, max_width):
+        """Create one geometrically identical mosaic for every modality."""
+
+        placement_offsets = [[0, 0], [max_width, 0], [0, max_height], [max_width, max_height]]
+        modality_count = len(samples[0]["images"])
+        merged_images = [
+            Image.new(
+                mode=samples[0]["images"][modality].mode,
+                size=(max_width * 2, max_height * 2),
+                color=0,
+            )
+            for modality in range(modality_count)
+        ]
+        offsets = torch.tensor([[0, 0], [max_width, 0], [0, max_height], [max_width, max_height]]).repeat(1, 2)
+
+        mosaic_targets = []
+        for index, sample in enumerate(samples):
+            for modality, image in enumerate(sample["images"]):
+                merged_images[modality].paste(image, placement_offsets[index])
+            target = self._clone(sample["labels"])
+            target["boxes"] = target["boxes"] + offsets[index]
+            mosaic_targets.append(target)
+
+        merged_target = {}
+        for key in mosaic_targets[0]:
+            values = [target[key] for target in mosaic_targets]
+            merged_target[key] = (
+                torch.cat(values, dim=0) if isinstance(values[0], torch.Tensor) else values
+            )
+        return merged_images, merged_target
+
+    @staticmethod
+    def _spatial_size(image):
+        return F.get_size(image) if hasattr(F, "get_size") else F.get_spatial_size(image)
+
+    def _apply_shared_affine(self, images, target, dataset):
+        """Replay RandomAffine with exactly one sampled parameter set."""
+
+        state_fn = getattr(dataset, "_rng_state", None)
+        restore_fn = getattr(dataset, "_set_rng_state", None)
+        if not callable(state_fn) or not callable(restore_fn):
+            # MultiModalCocoDetection supplies these methods.  Keep a safe
+            # fallback for custom datasets that use this transform directly.
+            transformed = [self.affine_transform(image) for image in images]
+            transformed_image, transformed_target = self.affine_transform(images[0], target)
+            del transformed_image
+            return transformed, transformed_target
+
+        initial_state = state_fn()
+        transformed = []
+        for image in images:
+            restore_fn(initial_state)
+            transformed.append(self.affine_transform(image))
+
+        # Applying the transform to the target consumes the RNG exactly once,
+        # which is the state subsequent transforms should observe.
+        restore_fn(initial_state)
+        _, transformed_target = self.affine_transform(images[0], target)
+        advanced_state = state_fn()
+        restore_fn(advanced_state)
+        return transformed, transformed_target
+
+    def forward_multimodal(self, images, target, dataset):
+        """Apply Mosaic to an aligned list of modality images.
+
+        This method is called by the multimodal Compose path.  It deliberately
+        keeps the sample identity and spatial transform shared across all
+        modalities while maintaining the original single-image ``forward``
+        implementation unchanged.
+        """
+
+        if self.probability < 1.0 and random.random() > self.probability:
+            return images, target, dataset
+
+        if self.use_cache:
+            samples = self._load_multimodal_samples_from_cache(images, target)
+        else:
+            samples = self._load_multimodal_samples_from_dataset(images, target, dataset)
+
+        sizes = [self._spatial_size(sample["images"][0]) for sample in samples]
+        max_height = max(size[0] for size in sizes)
+        max_width = max(size[1] for size in sizes)
+        mosaic_images, mosaic_target = self.create_multimodal_mosaic(samples, max_height, max_width)
+
+        if "boxes" in mosaic_target:
+            mosaic_target["boxes"] = convert_to_tv_tensor(
+                mosaic_target["boxes"],
+                "boxes",
+                box_format="xyxy",
+                spatial_size=mosaic_images[0].size[::-1],
+            )
+        if "masks" in mosaic_target:
+            mosaic_target["masks"] = convert_to_tv_tensor(mosaic_target["masks"], "masks")
+
+        mosaic_images, mosaic_target = self._apply_shared_affine(
+            mosaic_images, mosaic_target, dataset
+        )
+        return mosaic_images, mosaic_target, dataset
 
     def forward(self, *inputs):
         """

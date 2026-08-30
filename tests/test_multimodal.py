@@ -26,6 +26,7 @@ from engine.multimodal import (  # noqa: E402
     SSA4ScaleStage,
 )
 from engine.data.dataset import MultiModalCocoDetection  # noqa: E402
+from engine.data.transforms.mosaic import Mosaic  # noqa: E402
 
 
 class DummyBackbone(nn.Module):
@@ -218,6 +219,33 @@ class MultiModalTinyFormerTests(unittest.TestCase):
             self.assertEqual(transform.input_stages, [0, 0, 0])
             self.assertEqual(images.shape, (9, 4, 4))
             self.assertEqual(target["stage"], 1)
+
+    def test_multimodal_mosaic_cache_stores_complete_aligned_bundles(self):
+        class IdentityResize(nn.Module):
+            def forward(self, *inputs):
+                return inputs[0] if len(inputs) == 1 else (inputs[0], inputs[1])
+
+        mosaic = object.__new__(Mosaic)
+        nn.Module.__init__(mosaic)
+        mosaic.resize = IdentityResize()
+        mosaic.multimodal_cache = []
+        mosaic.max_cached_images = 10
+        mosaic.random_pop = False
+
+        for sample_index in range(2):
+            images = [
+                Image.new("RGB", (2, 2), color=(sample_index * 20 + offset, 0, 0))
+                for offset in (1, 101, 201)
+            ]
+            target = {"boxes": torch.zeros((1, 4)), "sample": torch.tensor([sample_index])}
+            mosaic._load_multimodal_samples_from_cache(images, target)
+
+        self.assertEqual(len(mosaic.multimodal_cache), 2)
+        for entry in mosaic.multimodal_cache:
+            self.assertIn("images", entry)
+            self.assertNotIn("img", entry)
+            pixels = [image.getpixel((0, 0))[0] for image in entry["images"]]
+            self.assertEqual([pixels[1] - pixels[0], pixels[2] - pixels[0]], [100, 200])
 
     def test_all_seven_modes_support_three_modalities(self):
         inputs = torch.randn(2, 9, 16, 16)
