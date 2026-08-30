@@ -15,6 +15,8 @@ from ._transforms import (
     SanitizeBoundingBoxes,
     RandomCrop,
     Normalize,
+    ModalityNormalize,
+    ModalityPhotometricDistort,
     ConvertBoxes,
     ConvertPILImage,
 )

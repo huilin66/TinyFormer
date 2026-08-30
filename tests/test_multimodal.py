@@ -27,6 +27,7 @@ from engine.multimodal import (  # noqa: E402
 )
 from engine.data.dataset import MultiModalCocoDetection  # noqa: E402
 from engine.data.transforms.mosaic import Mosaic  # noqa: E402
+from engine.data.transforms._transforms import ModalityNormalize  # noqa: E402
 
 
 class DummyBackbone(nn.Module):
@@ -246,6 +247,17 @@ class MultiModalTinyFormerTests(unittest.TestCase):
             self.assertNotIn("img", entry)
             pixels = [image.getpixel((0, 0))[0] for image in entry["images"]]
             self.assertEqual([pixels[1] - pixels[0], pixels[2] - pixels[0]], [100, 200])
+
+    def test_modality_normalize_uses_distinct_statistics(self):
+        normalize = ModalityNormalize(modalities=["rgb", "infrared", "depth"])
+        images = [torch.full((3, 2, 2), 0.5) for _ in range(3)]
+        normalized, target, dataset = normalize.forward_multimodal(images, {"id": 1}, object())
+
+        self.assertEqual(target, {"id": 1})
+        self.assertEqual(tuple(normalized[0].shape), (3, 2, 2))
+        self.assertTrue(torch.allclose(normalized[0][:, 0, 0], torch.tensor([0.0655, 0.1964, 0.4178]), atol=1e-4))
+        self.assertTrue(torch.allclose(normalized[1], torch.zeros_like(normalized[1])))
+        self.assertTrue(torch.allclose(normalized[2], torch.zeros_like(normalized[2])))
 
     def test_all_seven_modes_support_three_modalities(self):
         inputs = torch.randn(2, 9, 16, 16)

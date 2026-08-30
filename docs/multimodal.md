@@ -48,6 +48,11 @@ MultiModalTinyFormer:
 selected fusion point. It is rejected when modality channel counts differ.
 When it is false, every branch is a deep copy with independent parameters.
 
+The modality names in the data transforms must use the same order as
+`modality_names` in the model block. The repository training launchers write
+this automatically; for a hand-written YAML, set the `modalities` field of
+`ModalityNormalize` (and `ModalityPhotometricDistort`) accordingly.
+
 The provided YAML describes the model and the original single-image COCO
 pipeline. A multimodal training dataset must emit one of the accepted input
 forms above and must apply identical geometric augmentation to aligned
@@ -59,6 +64,32 @@ image bundles and replays one shared affine transform for every modality; it
 never reuses the single-image cache or samples extra images from only the first
 modality folder. Single-modal datasets continue to use the original `Mosaic`
 path.
+
+## Modality-specific preprocessing
+
+Use `ModalityNormalize` after `ConvertPILImage` for multimodal data. It keeps
+ImageNet statistics for RGB, uses centred grayscale defaults for infrared, and
+uses a symmetric `[0, 1]`-to-`[-1, 1]` mapping for preprocessed depth. Unknown
+modality names use the configurable `default_mean`/`default_std` values. A
+project-specific table can be supplied in YAML:
+
+```yaml
+- {type: ModalityNormalize,
+   modalities: [rgb, infrared, depth],
+   stats:
+     rgb: {mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}
+     infrared: {mean: [0.5, 0.5, 0.5], std: [0.25, 0.25, 0.25]}
+     depth: {mean: [0.5, 0.5, 0.5], std: [0.5, 0.5, 0.5]}}
+```
+
+`ModalityPhotometricDistort` is the matching augmentation wrapper. Set
+`active_modalities: [rgb]` (the generated training configs do this) so hue and
+saturation changes are not applied to infrared or depth. Both transforms work
+with any number and ordering of modalities and leave the original single-modal
+`Normalize`/`RandomPhotometricDistort` transforms unchanged. The submission
+backend detects the transform recorded in `tinyformer_multimodal_resolved.yaml`,
+so checkpoints produced with the legacy RGB-only normalization remain
+reproducible.
 
 ## Fusion interface
 
